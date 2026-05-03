@@ -1,0 +1,109 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: "0 9 * * *"  # daily at 09:00 UTC (~02:00 PT)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://github.com/sunnypilot/sunnypilot.git
+  BRANCH: hkg-angle-steering-2025
+
+jobs:
+  sync:
+    name: Rebase fork branch onto upstream
+    runs-on: ubuntu-latest
+    if: github.repository == 'the-database/sunnypilot'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch upstream "$BRANCH"
+
+      - name: Check whether sync is needed
+        id: check
+        run: |
+          LOCAL=$(git rev-parse HEAD)
+          UPSTREAM=$(git rev-parse "upstream/$BRANCH")
+          BASE=$(git merge-base HEAD "upstream/$BRANCH")
+          echo "local=$LOCAL"       >> "$GITHUB_OUTPUT"
+          echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
+          if [ "$BASE" = "$UPSTREAM" ]; then
+            echo "Already up to date with upstream/$BRANCH."
+            echo "needs_sync=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_sync=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase onto upstream
+        if: steps.check.outputs.needs_sync == 'true'
+        id: rebase
+        run: |
+          set +e
+          git rebase "upstream/$BRANCH"
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            CONFLICTS=$(git diff --name-only --diff-filter=U)
+            git rebase --abort
+            {
+              echo "conflict=true"
+              echo "conflict_files<<EOF"
+              echo "$CONFLICTS"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "conflict=false" >> "$GITHUB_OUTPUT"
+
+      - name: Push rebased branch
+        if: steps.check.outputs.needs_sync == 'true' && steps.rebase.outputs.conflict != 'true'
+        run: git push --force-with-lease origin "$BRANCH"
+
+      - name: Open conflict issue
+        if: failure() && steps.rebase.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Upstream sync conflict on $BRANCH" \
+            --body "The nightly upstream-sync workflow could not rebase \`$BRANCH\` onto \`upstream/$BRANCH\` cleanly.
+
+          **Local HEAD:** \`${{ steps.check.outputs.local }}\`
+          **Upstream HEAD:** \`${{ steps.check.outputs.upstream }}\`
+
+          **Conflicting files:**
+          \`\`\`
+          ${{ steps.rebase.outputs.conflict_files }}
+          \`\`\`
+
+          Resolve manually:
+          \`\`\`
+          git fetch upstream $BRANCH
+          git checkout $BRANCH
+          git rebase upstream/$BRANCH
+          # resolve, then:
+          git push --force-with-lease origin $BRANCH
+          \`\`\`
+
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
