@@ -76,8 +76,36 @@ jobs:
           fi
           echo "conflict=false" >> "$GITHUB_OUTPUT"
 
+      - name: Verify no fork commits modify safety code
+        # Per comma.ai's Oct 2025 policy, modifying any of these paths can result
+        # in a server-access ban. Block the push if any fork-only commit ever
+        # touches them. Runs whether or not a rebase happened — catches both
+        # accidental drift introduced by the rebase and anything the user might
+        # have pushed manually since the last sync.
+        if: steps.rebase.outputs.conflict != 'true'
+        id: safety_check
+        run: |
+          set +e
+          OFFENDERS=$(git diff --name-only "upstream/$BRANCH"..HEAD -- \
+            'opendbc/safety/**' \
+            'opendbc/dbc/**' \
+            'panda/**')
+          if [ -n "$OFFENDERS" ]; then
+            {
+              echo "safety_violation=true"
+              echo "offending_files<<EOF"
+              echo "$OFFENDERS"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error::Fork commits modify safety code paths — refusing to push"
+            echo "$OFFENDERS"
+            exit 1
+          fi
+          echo "safety_violation=false" >> "$GITHUB_OUTPUT"
+          echo "Safety check passed — no fork commit touches opendbc/safety, opendbc/dbc, or panda."
+
       - name: Push rebased branch
-        if: steps.check.outputs.needs_sync == 'true' && steps.rebase.outputs.conflict != 'true'
+        if: steps.check.outputs.needs_sync == 'true' && steps.rebase.outputs.conflict != 'true' && steps.safety_check.outputs.safety_violation != 'true'
         run: git push --force-with-lease origin "$BRANCH"
 
       - name: Open conflict issue
@@ -105,5 +133,34 @@ jobs:
           # resolve, then:
           git push --force-with-lease origin $BRANCH
           \`\`\`
+
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Open safety violation issue
+        if: failure() && steps.safety_check.outputs.safety_violation == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Safety code modification detected on $BRANCH — push blocked" \
+            --body "The upstream-sync workflow refused to push because a fork-only commit modifies safety code paths. Per comma.ai's October 2025 policy, modifying safety code can result in a comma server-access ban.
+
+          **Forbidden paths:** \`opendbc/safety/\`, \`opendbc/dbc/\`, \`panda/\`
+
+          **Offending files in the fork-only delta (\`upstream/$BRANCH..HEAD\`):**
+          \`\`\`
+          ${{ steps.safety_check.outputs.offending_files }}
+          \`\`\`
+
+          **Local HEAD:** \`${{ steps.check.outputs.local }}\`
+          **Upstream HEAD:** \`${{ steps.check.outputs.upstream }}\`
+
+          Review fork-only commits with:
+          \`\`\`
+          git fetch upstream $BRANCH
+          git log upstream/$BRANCH..HEAD
+          \`\`\`
+
+          Either revert the offending commit, move the change to a non-safety path, or accept the ban risk by disabling this guard.
 
           Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
