@@ -312,7 +312,7 @@ class Device(DeviceSP):
       if gui_app.sunnypilot_ui():
         min_brightness = DeviceSP.set_min_onroad_brightness(ui_state, min_brightness)
 
-      clipped_brightness = float(np.interp(clipped_brightness, [0, 1], [min_brightness, 100]))
+      clipped_brightness = float(np.clip(100 * clipped_brightness, min_brightness, 100))
 
     brightness = round(self._brightness_filter.update(clipped_brightness))
 
