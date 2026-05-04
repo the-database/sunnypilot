@@ -104,8 +104,48 @@ jobs:
           echo "safety_violation=false" >> "$GITHUB_OUTPUT"
           echo "Safety check passed — no fork commit touches opendbc/safety, opendbc/dbc, or panda."
 
+      - name: Verify changed submodule pins are reachable
+        # When the rebase bumps a submodule pin (e.g. opendbc, panda), verify the
+        # new SHA actually exists on the configured submodule remote URL. Catches
+        # the case where upstream points the parent at a SHA that's been
+        # force-pushed away from the submodule repo — would silently fail on the
+        # device during `git submodule update`.
+        if: steps.rebase.outputs.conflict != 'true' && steps.safety_check.outputs.safety_violation != 'true'
+        id: submodule_check
+        run: |
+          set +e
+          BAD=""
+          # List paths whose 160000 (gitlink/submodule) pin changed between old fork tip and new HEAD
+          CHANGED=$(git diff --raw "origin/$BRANCH" HEAD | awk '/^:160000 160000/ {print $6}')
+          for SM_PATH in $CHANGED; do
+            NEW_SHA=$(git ls-tree HEAD "$SM_PATH" | awk '{print $3}')
+            # Map path → submodule name → URL (name and path can differ)
+            NAME=$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk -v p="$SM_PATH" '$2 == p {sub(/^submodule\./, "", $1); sub(/\.path$/, "", $1); print $1; exit}')
+            URL=$(git config -f .gitmodules "submodule.$NAME.url")
+            if [ -z "$URL" ] || [ -z "$NEW_SHA" ]; then
+              BAD="${BAD}- $SM_PATH: missing URL or SHA (name=$NAME)\n"
+              continue
+            fi
+            if ! git ls-remote "$URL" "$NEW_SHA" 2>/dev/null | grep -q "^$NEW_SHA"; then
+              BAD="${BAD}- \`$SM_PATH\` → \`$NEW_SHA\` not reachable on \`$URL\`\n"
+            fi
+          done
+          if [ -n "$BAD" ]; then
+            {
+              echo "submodule_violation=true"
+              echo "bad_submodules<<EOF"
+              printf '%b' "$BAD"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error::One or more changed submodule pins are not reachable on their remote"
+            printf '%b' "$BAD"
+            exit 1
+          fi
+          echo "submodule_violation=false" >> "$GITHUB_OUTPUT"
+          echo "All changed submodule pins are reachable."
+
       - name: Push rebased branch
-        if: steps.check.outputs.needs_sync == 'true' && steps.rebase.outputs.conflict != 'true' && steps.safety_check.outputs.safety_violation != 'true'
+        if: steps.check.outputs.needs_sync == 'true' && steps.rebase.outputs.conflict != 'true' && steps.safety_check.outputs.safety_violation != 'true' && steps.submodule_check.outputs.submodule_violation != 'true'
         run: git push --force-with-lease origin "$BRANCH"
 
       - name: Open conflict issue
@@ -162,5 +202,27 @@ jobs:
           \`\`\`
 
           Either revert the offending commit, move the change to a non-safety path, or accept the ban risk by disabling this guard.
+
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Open submodule reachability issue
+        if: failure() && steps.submodule_check.outputs.submodule_violation == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Unreachable submodule pin on $BRANCH — push blocked" \
+            --body "The upstream-sync workflow refused to push because the rebase would set a submodule pin to a SHA that doesn't exist on the configured submodule remote URL. This usually means the upstream submodule maintainer force-pushed and orphaned the SHA. Pushing this state to the fork would cause device updates to fail with \`fatal: remote error: upload-pack: not our ref <SHA>\`.
+
+          **Bad submodule pins:**
+          ${{ steps.submodule_check.outputs.bad_submodules }}
+
+          **Local HEAD:** \`${{ steps.check.outputs.local }}\`
+          **Upstream HEAD:** \`${{ steps.check.outputs.upstream }}\`
+
+          Options:
+          1. Wait for upstream to repush the missing SHA or bump to a new one (and re-run the workflow).
+          2. Investigate which upstream commit introduced the bad pin: \`git log --oneline origin/$BRANCH..upstream/$BRANCH -- <submodule path>\`.
+          3. If the SHA exists on a different remote, you can change the submodule URL in \`.gitmodules\` (only do this if you know what you're doing).
 
           Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
