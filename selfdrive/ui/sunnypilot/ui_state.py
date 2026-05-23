@@ -229,7 +229,7 @@ class DeviceSP:
   @staticmethod
   def set_min_onroad_brightness(_ui_state, min_brightness: int) -> int:
     if _ui_state.onroad_brightness == OnroadBrightness.AUTO_DARK:
-      min_brightness = 3
+      min_brightness = 1
 
     return min_brightness
 
