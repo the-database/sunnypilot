@@ -23,6 +23,7 @@ env:
   BRANCH: hkg-angle-steering-2025
   OPENDBC_OVERLAY_BRANCH: codex/hkg-elantra-2024-port
   OPENDBC_OVERLAY_SUBJECT: "opendbc: refresh Elantra 2024 overlay"
+  OPENDBC_OVERLAY_PATCH: .github/hkg-elantra/opendbc-overlay.patch
 
 jobs:
   sync:
@@ -100,8 +101,8 @@ jobs:
             fi
           done
 
-          # Keep the push-trigger copy of this workflow present on the HKG branch.
-          git checkout origin/master -- .github/workflows/upstream-sync.yaml
+          # Keep the push-trigger copy of this workflow and its resolved overlay patch present on the HKG branch.
+          git checkout origin/master -- .github/workflows/upstream-sync.yaml "$OPENDBC_OVERLAY_PATCH"
 
           echo "conflict=false" >> "$GITHUB_OUTPUT"
 
@@ -119,7 +120,6 @@ jobs:
           git remote set-url fork "https://x-access-token:${OPENDBC_PUSH_TOKEN}@github.com/422415/opendbc.git"
 
           git fetch source "$BRANCH"
-          git fetch source elantra-2024-port
           git fetch fork "$OPENDBC_OVERLAY_BRANCH" || true
 
           BASE_OPENDBC_SHA=$(git -C .. ls-tree HEAD opendbc_repo | awk '{print $3}')
@@ -128,33 +128,25 @@ jobs:
 
           git switch -C "$OPENDBC_OVERLAY_BRANCH" "$BASE_OPENDBC_SHA"
 
-          for commit in \
-            93d37c9eee13cb55de4785d36dec7fdc7586e15d \
-            58c1b11811f8622c2a566c59e5f23765e601a026 \
-            45c53da6d6e3bafbf2a2624f21680e979ed7c1fa \
-            23884d6381f8dff27d636872a035eb0ed8bfe865
-          do
-            echo "Cherry-picking opendbc port commit: $commit"
-            set +e
-            git cherry-pick -x "$commit"
-            rc=$?
-            set -e
-            if [ "$rc" -eq 0 ]; then
-              continue
-            fi
-
-            if git diff --quiet && git diff --cached --quiet; then
-              echo "Cherry-pick became empty; skipping $commit"
-              git cherry-pick --skip
-              continue
-            fi
-
-            echo "::error::Conflict while cherry-picking opendbc commit $commit"
+          PATCH_PATH="../$OPENDBC_OVERLAY_PATCH"
+          if git apply --check --3way "$PATCH_PATH"; then
+            git apply --3way "$PATCH_PATH"
+          elif git apply --reverse --check "$PATCH_PATH"; then
+            echo "Resolved Elantra overlay is already included in the opendbc base."
+          else
+            echo "::error::Could not apply resolved Elantra opendbc overlay patch"
+            git apply --3way "$PATCH_PATH" || true
             git diff --name-only --diff-filter=U
-            exit "$rc"
-          done
+            exit 1
+          fi
 
-          git diff --check "$BASE_OPENDBC_SHA..HEAD"
+          git diff --check
+          git add -A
+          git diff --cached --check
+          if ! git diff --cached --quiet; then
+            git commit -m "$OPENDBC_OVERLAY_SUBJECT"
+          fi
+
           OPENDBC_SHA=$(git rev-parse HEAD)
           echo "sha=$OPENDBC_SHA" >> "$GITHUB_OUTPUT"
 
@@ -168,7 +160,7 @@ jobs:
           git config submodule.opendbc.url "$OPENDBC_FORK_URL"
           git -C opendbc_repo checkout "${{ steps.opendbc.outputs.sha }}"
 
-          git add .github/workflows/upstream-sync.yaml .gitmodules opendbc_repo
+          git add .github/workflows/upstream-sync.yaml "$OPENDBC_OVERLAY_PATCH" .gitmodules opendbc_repo
           if ! git diff --cached --quiet; then
             git commit -m "$OPENDBC_OVERLAY_SUBJECT"
           fi
