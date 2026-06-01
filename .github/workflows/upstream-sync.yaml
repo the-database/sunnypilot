@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.repository == 'the-database/sunnypilot'
     env:
-      BRANCH_PUSH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BRANCH_PUSH_TOKEN: ${{ github.token }}
       OPENDBC_PUSH_TOKEN: ${{ secrets.OPENDBC_PUSH_TOKEN }}
     steps:
       - uses: actions/checkout@v6
@@ -40,7 +40,7 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           persist-credentials: false
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ github.token }}
 
       - name: Configure git identity
         run: |
@@ -239,7 +239,7 @@ jobs:
       - name: Open sync failure issue
         if: failure()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh issue create \
             --title "HKG Elantra sync failed on $BRANCH" \
