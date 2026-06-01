@@ -31,6 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.repository == 'the-database/sunnypilot'
     env:
+      BRANCH_PUSH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OPENDBC_PUSH_TOKEN: ${{ secrets.OPENDBC_PUSH_TOKEN }}
     steps:
       - uses: actions/checkout@v6
@@ -38,7 +39,7 @@ jobs:
           ref: ${{ env.BRANCH }}
           fetch-depth: 0
           submodules: recursive
-          persist-credentials: true
+          persist-credentials: false
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure git identity
@@ -233,7 +234,7 @@ jobs:
             exit 0
           fi
 
-          git push --force-with-lease origin "HEAD:$BRANCH"
+          git push --force-with-lease "https://x-access-token:${BRANCH_PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:$BRANCH"
 
       - name: Open sync failure issue
         if: failure()
