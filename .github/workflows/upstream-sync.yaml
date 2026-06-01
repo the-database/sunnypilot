@@ -58,7 +58,7 @@ jobs:
           set -euo pipefail
 
           git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
-          git fetch origin "$BRANCH"
+          git fetch origin "+refs/heads/master:refs/remotes/origin/master" "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
           git fetch upstream "$BRANCH"
 
           OLD_HEAD=$(git rev-parse "origin/$BRANCH")
