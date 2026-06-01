@@ -145,6 +145,18 @@ jobs:
           git diff --check
           git add -A
           git diff --cached --check
+
+          DESIRED_TREE=$(git write-tree)
+          if git rev-parse --verify -q "fork/$OPENDBC_OVERLAY_BRANCH^{commit}" >/dev/null; then
+            EXISTING_SHA=$(git rev-parse "fork/$OPENDBC_OVERLAY_BRANCH")
+            EXISTING_TREE=$(git rev-parse "$EXISTING_SHA^{tree}")
+            if [ "$EXISTING_TREE" = "$DESIRED_TREE" ]; then
+              echo "Existing opendbc overlay already has the desired tree: $EXISTING_SHA"
+              echo "sha=$EXISTING_SHA" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
           if ! git diff --cached --quiet; then
             git commit -m "$OPENDBC_OVERLAY_SUBJECT"
           fi
@@ -241,7 +253,7 @@ jobs:
             exit 0
           fi
 
-          git push --force-with-lease "https://x-access-token:${BRANCH_PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:$BRANCH"
+          git push --force-with-lease="refs/heads/$BRANCH:$OLD_HEAD" "https://x-access-token:${BRANCH_PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:$BRANCH"
 
       - name: Open sync failure issue
         if: failure()
