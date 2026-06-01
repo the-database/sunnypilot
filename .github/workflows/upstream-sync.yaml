@@ -117,6 +117,7 @@ jobs:
 
           git remote add source "$OPENDBC_SOURCE_URL" 2>/dev/null || git remote set-url source "$OPENDBC_SOURCE_URL"
           git remote add fork "$OPENDBC_FORK_URL" 2>/dev/null || git remote set-url fork "$OPENDBC_FORK_URL"
+          git config --local --unset-all http.https://github.com/.extraheader || true
           git remote set-url fork "https://x-access-token:${OPENDBC_PUSH_TOKEN}@github.com/422415/opendbc.git"
 
           git fetch source "$BRANCH"
