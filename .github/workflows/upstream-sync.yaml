@@ -2,11 +2,8 @@ name: Upstream Sync
 
 on:
   schedule:
-    - cron: "0 9 * * *" # daily at 09:00 UTC
+    - cron: "0 9 * * *"  # daily at 09:00 UTC (~02:00 PT)
   workflow_dispatch:
-  push:
-    branches:
-      - hkg-angle-steering-2025
 
 permissions:
   contents: write
@@ -18,168 +15,74 @@ concurrency:
 
 env:
   UPSTREAM_URL: https://github.com/sunnypilot/sunnypilot.git
-  OPENDBC_SOURCE_URL: https://github.com/sunnypilot/opendbc.git
-  OPENDBC_FORK_URL: https://github.com/422415/opendbc.git
   BRANCH: hkg-angle-steering-2025
-  OPENDBC_OVERLAY_BRANCH: codex/hkg-elantra-2024-port
-  OPENDBC_OVERLAY_SUBJECT: "opendbc: refresh Elantra 2024 overlay"
-  OPENDBC_OVERLAY_PATCH: .github/hkg-elantra/opendbc-overlay.patch
 
 jobs:
   sync:
-    name: Rebase HKG branch and rebuild Elantra overlay
+    name: Rebase fork branch onto upstream
     runs-on: ubuntu-latest
     if: github.repository == 'the-database/sunnypilot'
-    env:
-      BRANCH_PUSH_TOKEN: ${{ github.token }}
-      OPENDBC_PUSH_TOKEN: ${{ secrets.OPENDBC_PUSH_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ env.BRANCH }}
           fetch-depth: 0
           submodules: recursive
-          persist-credentials: false
-          token: ${{ github.token }}
+          persist-credentials: true
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure git identity
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Verify required token
+      - name: Add upstream remote and fetch
         run: |
-          if [ -z "${OPENDBC_PUSH_TOKEN}" ]; then
-            echo "::error::Missing OPENDBC_PUSH_TOKEN. Add a repo Actions secret with Contents write access to 422415/opendbc."
-            exit 1
-          fi
-
-      - name: Rebuild branch from upstream and fork patches
-        id: rebuild
-        run: |
-          set -euo pipefail
-
-          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
-          git fetch origin "+refs/heads/master:refs/remotes/origin/master" "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+          git remote add upstream "$UPSTREAM_URL"
           git fetch upstream "$BRANCH"
 
-          OLD_HEAD=$(git rev-parse "origin/$BRANCH")
-          UPSTREAM_HEAD=$(git rev-parse "upstream/$BRANCH")
-          echo "old=$OLD_HEAD" >> "$GITHUB_OUTPUT"
-          echo "upstream=$UPSTREAM_HEAD" >> "$GITHUB_OUTPUT"
-
-          git switch -C "$BRANCH" "$OLD_HEAD"
-          FORK_COMMITS=$(git rev-list --reverse "upstream/$BRANCH..$OLD_HEAD")
-
-          git reset --hard "$UPSTREAM_HEAD"
-
-          for commit in $FORK_COMMITS; do
-            subject=$(git log -1 --format=%s "$commit")
-            case "$subject" in
-              "$OPENDBC_OVERLAY_SUBJECT"|"opendbc: merge Elantra 2024 port into HKG branch")
-                echo "Skipping generated overlay commit: $commit $subject"
-                continue
-                ;;
-            esac
-
-            echo "Replaying fork commit: $commit $subject"
-            set +e
-            git cherry-pick "$commit"
-            rc=$?
-            set -e
-            if [ "$rc" -ne 0 ]; then
-              conflicts=$(git diff --name-only --diff-filter=U)
-              git cherry-pick --abort || true
-              {
-                echo "conflict=true"
-                echo "conflict_files<<EOF"
-                echo "$conflicts"
-                echo "EOF"
-              } >> "$GITHUB_OUTPUT"
-              echo "::error::Could not replay fork commit $commit"
-              echo "$conflicts"
-              exit "$rc"
-            fi
-          done
-
-          # Keep the push-trigger copy of this workflow and its resolved overlay patch present on the HKG branch.
-          git checkout origin/master -- .github/workflows/upstream-sync.yaml "$OPENDBC_OVERLAY_PATCH"
-
-          echo "conflict=false" >> "$GITHUB_OUTPUT"
-
-      - name: Rebuild opendbc Elantra overlay
-        id: opendbc
-        working-directory: opendbc_repo
+      - name: Check whether sync is needed
+        id: check
         run: |
-          set -euo pipefail
-
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git remote add source "$OPENDBC_SOURCE_URL" 2>/dev/null || git remote set-url source "$OPENDBC_SOURCE_URL"
-          git remote add fork "$OPENDBC_FORK_URL" 2>/dev/null || git remote set-url fork "$OPENDBC_FORK_URL"
-          git config --local --unset-all http.https://github.com/.extraheader || true
-          git remote set-url fork "https://x-access-token:${OPENDBC_PUSH_TOKEN}@github.com/422415/opendbc.git"
-
-          git fetch source "$BRANCH"
-          git fetch fork "$OPENDBC_OVERLAY_BRANCH" || true
-
-          BASE_OPENDBC_SHA=$(git -C .. ls-tree HEAD opendbc_repo | awk '{print $3}')
-          echo "Base opendbc SHA after fork patches: $BASE_OPENDBC_SHA"
-          git cat-file -e "${BASE_OPENDBC_SHA}^{commit}"
-
-          git switch -C "$OPENDBC_OVERLAY_BRANCH" "$BASE_OPENDBC_SHA"
-
-          PATCH_PATH="../$OPENDBC_OVERLAY_PATCH"
-          if git apply --check --3way "$PATCH_PATH"; then
-            git apply --3way "$PATCH_PATH"
-          elif git apply --reverse --check "$PATCH_PATH"; then
-            echo "Resolved Elantra overlay is already included in the opendbc base."
+          LOCAL=$(git rev-parse HEAD)
+          UPSTREAM=$(git rev-parse "upstream/$BRANCH")
+          BASE=$(git merge-base HEAD "upstream/$BRANCH")
+          echo "local=$LOCAL"       >> "$GITHUB_OUTPUT"
+          echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
+          if [ "$BASE" = "$UPSTREAM" ]; then
+            echo "Already up to date with upstream/$BRANCH."
+            echo "needs_sync=false" >> "$GITHUB_OUTPUT"
           else
-            echo "::error::Could not apply resolved Elantra opendbc overlay patch"
-            git apply --3way "$PATCH_PATH" || true
-            git diff --name-only --diff-filter=U
+            echo "needs_sync=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase onto upstream
+        if: steps.check.outputs.needs_sync == 'true'
+        id: rebase
+        run: |
+          set +e
+          git rebase "upstream/$BRANCH"
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            CONFLICTS=$(git diff --name-only --diff-filter=U)
+            git rebase --abort
+            {
+              echo "conflict=true"
+              echo "conflict_files<<EOF"
+              echo "$CONFLICTS"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
             exit 1
           fi
-
-          git diff --check
-          git add -A
-          git diff --cached --check
-
-          DESIRED_TREE=$(git write-tree)
-          if git rev-parse --verify -q "fork/$OPENDBC_OVERLAY_BRANCH^{commit}" >/dev/null; then
-            EXISTING_SHA=$(git rev-parse "fork/$OPENDBC_OVERLAY_BRANCH")
-            EXISTING_TREE=$(git rev-parse "$EXISTING_SHA^{tree}")
-            if [ "$EXISTING_TREE" = "$DESIRED_TREE" ]; then
-              echo "Existing opendbc overlay already has the desired tree: $EXISTING_SHA"
-              echo "sha=$EXISTING_SHA" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
-
-          if ! git diff --cached --quiet; then
-            git commit -m "$OPENDBC_OVERLAY_SUBJECT"
-          fi
-
-          OPENDBC_SHA=$(git rev-parse HEAD)
-          echo "sha=$OPENDBC_SHA" >> "$GITHUB_OUTPUT"
-
-          git push --force-with-lease fork "$OPENDBC_OVERLAY_BRANCH"
-
-      - name: Point HKG branch at rebuilt opendbc overlay
-        run: |
-          set -euo pipefail
-
-          git config -f .gitmodules submodule.opendbc.url "$OPENDBC_FORK_URL"
-          git config submodule.opendbc.url "$OPENDBC_FORK_URL"
-          git -C opendbc_repo checkout "${{ steps.opendbc.outputs.sha }}"
-
-          git add .github/workflows/upstream-sync.yaml "$OPENDBC_OVERLAY_PATCH" .gitmodules opendbc_repo
-          if ! git diff --cached --quiet; then
-            git commit -m "$OPENDBC_OVERLAY_SUBJECT"
-          fi
+          echo "conflict=false" >> "$GITHUB_OUTPUT"
 
       - name: Verify no fork commits modify safety code
+        # Per comma.ai's Oct 2025 policy, modifying any of these paths can result
+        # in a server-access ban. Block the push if any fork-only commit ever
+        # touches them. Runs whether or not a rebase happened — catches both
+        # accidental drift introduced by the rebase and anything the user might
+        # have pushed manually since the last sync.
+        if: steps.rebase.outputs.conflict != 'true'
         id: safety_check
         run: |
           set +e
@@ -194,14 +97,20 @@ jobs:
               echo "$OFFENDERS"
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
-            echo "::error::Fork commits modify safety code paths - refusing to push"
+            echo "::error::Fork commits modify safety code paths — refusing to push"
             echo "$OFFENDERS"
             exit 1
           fi
           echo "safety_violation=false" >> "$GITHUB_OUTPUT"
-          echo "Safety check passed - no fork commit touches opendbc/safety, opendbc/dbc, or panda."
+          echo "Safety check passed — no fork commit touches opendbc/safety, opendbc/dbc, or panda."
 
-      - name: Verify submodule pins are reachable
+      - name: Verify changed submodule pins are reachable
+        # When the rebase bumps a submodule pin (e.g. opendbc, panda), verify the
+        # new SHA actually exists on the configured submodule remote URL. Catches
+        # the case where upstream points the parent at a SHA that's been
+        # force-pushed away from the submodule repo — would silently fail on the
+        # device during `git submodule update` with `not our ref <SHA>`.
+        if: steps.rebase.outputs.conflict != 'true' && steps.safety_check.outputs.safety_violation != 'true'
         id: submodule_check
         run: |
           set +e
@@ -209,24 +118,27 @@ jobs:
           TMPDIR=$(mktemp -d)
           trap 'rm -rf "$TMPDIR"' EXIT
           idx=0
-
-          while read -r key path; do
+          # Only check submodule pins that actually changed in this rebase.
+          # Format from `git diff --raw`: `:160000 160000 <old> <new> M <path>`
+          CHANGED=$(git diff --raw "origin/$BRANCH" HEAD | awk '/^:160000 160000/ {print $6}')
+          for SM_PATH in $CHANGED; do
             idx=$((idx + 1))
-            name=${key#submodule.}
-            name=${name%.path}
-            url=$(git config -f .gitmodules "submodule.$name.url")
-            sha=$(git ls-tree HEAD "$path" | awk '{print $3}')
-            if [ -z "$url" ] || [ -z "$sha" ]; then
-              BAD="${BAD}- $path: missing URL or SHA (name=$name)\n"
+            NEW_SHA=$(git ls-tree HEAD "$SM_PATH" | awk '{print $3}')
+            # Map path → submodule name → URL (name and path can differ, e.g. opendbc_repo vs opendbc)
+            NAME=$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk -v p="$SM_PATH" '$2 == p {sub(/^submodule\./, "", $1); sub(/\.path$/, "", $1); print $1; exit}')
+            URL=$(git config -f .gitmodules "submodule.$NAME.url")
+            if [ -z "$URL" ] || [ -z "$NEW_SHA" ]; then
+              BAD="${BAD}- $SM_PATH: missing URL or SHA (name=$NAME)\n"
               continue
             fi
+            # `ls-remote` only sees advertised refs; an arbitrary commit SHA may
+            # not be a ref-tip. `fetch --depth=1` works for any reachable object.
             check_repo="$TMPDIR/submodule-$idx"
             git init -q "$check_repo"
-            if ! git -C "$check_repo" fetch --depth=1 "$url" "$sha" >/dev/null 2>&1; then
-              BAD="${BAD}- \`$path\` -> \`$sha\` not reachable on \`$url\`\n"
+            if ! git -C "$check_repo" fetch --depth=1 "$URL" "$NEW_SHA" >/dev/null 2>&1; then
+              BAD="${BAD}- \`$SM_PATH\` -> \`$NEW_SHA\` not reachable on \`$URL\`\n"
             fi
-          done < <(git config -f .gitmodules --get-regexp '^submodule\..*\.path$')
-
+          done
           if [ -n "$BAD" ]; then
             {
               echo "submodule_violation=true"
@@ -234,49 +146,97 @@ jobs:
               printf '%b' "$BAD"
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
-            echo "::error::One or more submodule pins are not reachable on their configured remotes"
+            echo "::error::One or more changed submodule pins are not reachable on their remote"
             printf '%b' "$BAD"
             exit 1
           fi
           echo "submodule_violation=false" >> "$GITHUB_OUTPUT"
-          echo "All submodule pins are reachable."
+          echo "All changed submodule pins are reachable."
 
-      - name: Push synced HKG branch
-        if: steps.safety_check.outputs.safety_violation != 'true' && steps.submodule_check.outputs.submodule_violation != 'true'
+      - name: Push rebased branch
+        if: steps.check.outputs.needs_sync == 'true' && steps.rebase.outputs.conflict != 'true' && steps.safety_check.outputs.safety_violation != 'true' && steps.submodule_check.outputs.submodule_violation != 'true'
         run: |
           set -euo pipefail
-          OLD_HEAD="${{ steps.rebuild.outputs.old }}"
-          UPSTREAM_HEAD="${{ steps.rebuild.outputs.upstream }}"
+          OLD_HEAD="${{ steps.check.outputs.local }}"
+          # Explicit lease form avoids the "stale lease" race where the local
+          # ref tracker thinks origin/$BRANCH has moved when it hasn't.
+          git push --force-with-lease="refs/heads/$BRANCH:$OLD_HEAD" origin "HEAD:$BRANCH"
 
-          if git diff --quiet "$OLD_HEAD" HEAD && git merge-base --is-ancestor "$UPSTREAM_HEAD" "$OLD_HEAD"; then
-            echo "$BRANCH is already up to date with the Elantra overlay."
-            exit 0
-          fi
-
-          git push --force-with-lease="refs/heads/$BRANCH:$OLD_HEAD" "https://x-access-token:${BRANCH_PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:$BRANCH"
-
-      - name: Open sync failure issue
-        if: failure()
+      - name: Open conflict issue
+        if: failure() && steps.rebase.outputs.conflict == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh issue create \
-            --title "HKG Elantra sync failed on $BRANCH" \
-            --body "The automated HKG sync could not update \`$BRANCH\`.
+            --title "Upstream sync conflict on $BRANCH" \
+            --body "The nightly upstream-sync workflow could not rebase \`$BRANCH\` onto \`upstream/$BRANCH\` cleanly.
 
-          **Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          **Local HEAD:** \`${{ steps.check.outputs.local }}\`
+          **Upstream HEAD:** \`${{ steps.check.outputs.upstream }}\`
 
-          If this is a missing-token failure, add the \`OPENDBC_PUSH_TOKEN\` Actions secret with Contents write access to \`422415/opendbc\`.
-
-          **Replay conflicts:**
+          **Conflicting files:**
           \`\`\`
-          ${{ steps.rebuild.outputs.conflict_files }}
+          ${{ steps.rebase.outputs.conflict_files }}
           \`\`\`
 
-          **Safety offenders:**
+          Resolve manually:
+          \`\`\`
+          git fetch upstream $BRANCH
+          git checkout $BRANCH
+          git rebase upstream/$BRANCH
+          # resolve, then:
+          git push --force-with-lease origin $BRANCH
+          \`\`\`
+
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Open safety violation issue
+        if: failure() && steps.safety_check.outputs.safety_violation == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Safety code modification detected on $BRANCH — push blocked" \
+            --body "The upstream-sync workflow refused to push because a fork-only commit modifies safety code paths. Per comma.ai's October 2025 policy, modifying safety code can result in a comma server-access ban.
+
+          **Forbidden paths:** \`opendbc/safety/\`, \`opendbc/dbc/\`, \`panda/\`
+
+          **Offending files in the fork-only delta (\`upstream/$BRANCH..HEAD\`):**
           \`\`\`
           ${{ steps.safety_check.outputs.offending_files }}
           \`\`\`
 
+          **Local HEAD:** \`${{ steps.check.outputs.local }}\`
+          **Upstream HEAD:** \`${{ steps.check.outputs.upstream }}\`
+
+          Review fork-only commits with:
+          \`\`\`
+          git fetch upstream $BRANCH
+          git log upstream/$BRANCH..HEAD
+          \`\`\`
+
+          Either revert the offending commit, move the change to a non-safety path, or accept the ban risk by disabling this guard.
+
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Open submodule reachability issue
+        if: failure() && steps.submodule_check.outputs.submodule_violation == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Unreachable submodule pin on $BRANCH — push blocked" \
+            --body "The upstream-sync workflow refused to push because the rebase would set a submodule pin to a SHA that doesn't exist on the configured submodule remote URL. This usually means the upstream submodule maintainer force-pushed and orphaned the SHA. Pushing this state to the fork would cause device updates to fail with \`fatal: remote error: upload-pack: not our ref <SHA>\`.
+
           **Bad submodule pins:**
-          ${{ steps.submodule_check.outputs.bad_submodules }}" || true
+          ${{ steps.submodule_check.outputs.bad_submodules }}
+
+          **Local HEAD:** \`${{ steps.check.outputs.local }}\`
+          **Upstream HEAD:** \`${{ steps.check.outputs.upstream }}\`
+
+          Options:
+          1. Wait for upstream to repush the missing SHA or bump to a new one (and re-run the workflow).
+          2. Investigate which upstream commit introduced the bad pin: \`git log --oneline origin/$BRANCH..upstream/$BRANCH -- <submodule path>\`.
+          3. If the SHA exists on a different remote, you can change the submodule URL in \`.gitmodules\` (only do this if you know what you're doing).
+
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
