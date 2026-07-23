@@ -161,7 +161,13 @@ jobs:
           OLD_HEAD="${{ steps.check.outputs.local }}"
           # Explicit lease form avoids the "stale lease" race where the local
           # ref tracker thinks origin/$BRANCH has moved when it hasn't.
-          git push --force-with-lease="refs/heads/$BRANCH:$OLD_HEAD" origin "HEAD:$BRANCH"
+          # --no-verify skips the git-lfs pre-push hook, which would try to
+          # re-push upstream's LFS blobs to sunnypilot's ssh://gitlab.com
+          # pushurl from .lfsconfig — the runner has no ssh key for gitlab,
+          # and we don't own those blobs anyway (upstream already published
+          # them; anyone pulling our fork will fetch them from the public
+          # https:// read URL in the same .lfsconfig).
+          git push --no-verify --force-with-lease="refs/heads/$BRANCH:$OLD_HEAD" origin "HEAD:$BRANCH"
 
       - name: Open conflict issue
         if: failure() && steps.rebase.outputs.conflict == 'true'
