@@ -29,7 +29,12 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           persist-credentials: true
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # PAT with `repo` + `workflow` scopes. The default GITHUB_TOKEN
+          # cannot push commits that touch .github/workflows/**, even with
+          # `permissions: contents: write` — that's a hardcoded platform
+          # rule for the App-installation-backed token. Upstream syncs bring
+          # in workflow file changes regularly, so we need the PAT.
+          token: ${{ secrets.SYNC_PUSH_TOKEN }}
 
       - name: Configure git identity
         run: |
@@ -172,7 +177,7 @@ jobs:
       - name: Open conflict issue
         if: failure() && steps.rebase.outputs.conflict == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SYNC_PUSH_TOKEN }}
         run: |
           gh issue create \
             --title "Upstream sync conflict on $BRANCH" \
@@ -200,7 +205,7 @@ jobs:
       - name: Open safety violation issue
         if: failure() && steps.safety_check.outputs.safety_violation == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SYNC_PUSH_TOKEN }}
         run: |
           gh issue create \
             --title "Safety code modification detected on $BRANCH — push blocked" \
@@ -229,7 +234,7 @@ jobs:
       - name: Open submodule reachability issue
         if: failure() && steps.submodule_check.outputs.submodule_violation == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SYNC_PUSH_TOKEN }}
         run: |
           gh issue create \
             --title "Unreachable submodule pin on $BRANCH — push blocked" \
