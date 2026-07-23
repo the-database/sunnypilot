@@ -119,11 +119,12 @@ jobs:
           trap 'rm -rf "$TMPDIR"' EXIT
           idx=0
           # Only check submodule pins that actually changed in this rebase.
-          # Format from `git diff --raw`: `:160000 160000 <old> <new> M <path>`
-          CHANGED=$(git diff --raw "origin/$BRANCH" HEAD | awk '/^:160000 160000/ {print $6}')
-          for SM_PATH in $CHANGED; do
+          # `git diff --raw --abbrev=40` rows:
+          #   :160000 160000 <old_sha> <new_sha> M   <path>
+          #   :160000 160000 <old_sha> <new_sha> R<pct>   <old_path>  <new_path>
+          # Field 4 is the new SHA; last field is the new path (works for both M and R).
+          while read -r NEW_SHA SM_PATH; do
             idx=$((idx + 1))
-            NEW_SHA=$(git ls-tree HEAD "$SM_PATH" | awk '{print $3}')
             # Map path → submodule name → URL (name and path can differ, e.g. opendbc_repo vs opendbc)
             NAME=$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk -v p="$SM_PATH" '$2 == p {sub(/^submodule\./, "", $1); sub(/\.path$/, "", $1); print $1; exit}')
             URL=$(git config -f .gitmodules "submodule.$NAME.url")
@@ -138,7 +139,7 @@ jobs:
             if ! git -C "$check_repo" fetch --depth=1 "$URL" "$NEW_SHA" >/dev/null 2>&1; then
               BAD="${BAD}- \`$SM_PATH\` -> \`$NEW_SHA\` not reachable on \`$URL\`\n"
             fi
-          done
+          done < <(git diff --raw --abbrev=40 "origin/$BRANCH" HEAD | awk '/^:160000 160000/ {print $4, $NF}')
           if [ -n "$BAD" ]; then
             {
               echo "submodule_violation=true"
@@ -165,7 +166,7 @@ jobs:
       - name: Open conflict issue
         if: failure() && steps.rebase.outputs.conflict == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh issue create \
             --title "Upstream sync conflict on $BRANCH" \
@@ -193,7 +194,7 @@ jobs:
       - name: Open safety violation issue
         if: failure() && steps.safety_check.outputs.safety_violation == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh issue create \
             --title "Safety code modification detected on $BRANCH — push blocked" \
@@ -222,7 +223,7 @@ jobs:
       - name: Open submodule reachability issue
         if: failure() && steps.submodule_check.outputs.submodule_violation == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh issue create \
             --title "Unreachable submodule pin on $BRANCH — push blocked" \
