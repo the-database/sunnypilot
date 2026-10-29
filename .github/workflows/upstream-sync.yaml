@@ -16,6 +16,9 @@ concurrency:
 env:
   UPSTREAM_URL: https://github.com/sunnypilot/sunnypilot.git
   BRANCH: hkg-angle-steering-2025
+  # Upstream moved LFS hosting to Hugging Face; smudging during rebase hits the
+  # stale .lfsconfig and 404s. The sync only needs pointers, not LFS content.
+  GIT_LFS_SKIP_SMUDGE: "1"
 
 jobs:
   sync:
